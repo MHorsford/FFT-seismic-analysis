@@ -10,7 +10,14 @@ para o contexto teórico e o plano completo):
    `resultados/benchmark_avancado.csv` e o gráfico correspondente
    (`visualization.plot_benchmark_avancado`, que já inclui o ajuste das
    curvas teóricas O(N²) e O(N log N) — ver `benchmark.ajustar_curvas`).
-   Não depende de rede: só de numpy/scipy.
+   Também gera aqui os diagramas DIDÁTICOS do algoritmo para N=8
+   (`visualization.plot_divisao_fft_n8` e `plot_borboleta_n8`) — eles não
+   fazem parte do benchmark em si (não medem tempo nem usam dado real ou
+   sintético nenhum, só índices abstratos x[0..7]), mas ficam em
+   `resultados/` porque, assim como o benchmark, não dependem de rede
+   nem do sismo real — iam soar deslocados dentro de
+   `resultados_fft_sismo/`, que é só para artefatos com dado real da
+   Venezuela. Não depende de rede: só de numpy/scipy.
 
 2. FASE 2 — Estudo de caso real (sismos da Venezuela, 24/06/2026)
    Busca estações sismográficas entre a Venezuela e o Pará
@@ -18,9 +25,8 @@ para o contexto teórico e o plano completo):
    (`data.baixar_forma_de_onda`), roda DFT e FFT sobre a mesma janela de
    análise e mede o tempo de cada uma (`processar_estacao`, abaixo).
    Gera mapa das estações, seção sísmica, espectros de frequência,
-   comparação DFT×FFT por estação, resumo em CSV e o diagrama da
-   borboleta para N=8 — tudo em `resultados_fft_sismo/`. Depende dos
-   serviços FDSN (rede).
+   comparação DFT×FFT por estação e resumo em CSV — tudo em
+   `resultados_fft_sismo/`. Depende dos serviços FDSN (rede).
 
 As duas fases são independentes de propósito — uma é síntese/teoria, a
 outra é o dado real — por isso vivem em funções separadas
@@ -57,6 +63,7 @@ from src.visualization import (
     plot_espectros,
     plot_benchmark,
     salvar_resumo_csv,
+    plot_divisao_fft_n8,
     plot_borboleta_n8,
     plot_benchmark_avancado,
 )
@@ -89,6 +96,14 @@ def rodar_benchmark_complexidade(lista_N=LISTA_N_BENCHMARK,
     OPERAÇÕES, não tempo — que sustenta a discussão de complexidade
     assintótica vs. desempenho medido (ver Plano de Execução, Passo 6).
 
+    Também gera, na mesma pasta, os dois diagramas didáticos do algoritmo
+    para N=8 (`visualization.plot_divisao_fft_n8` e `plot_borboleta_n8`).
+    Eles não entram no CSV nem têm relação matemática com o benchmark —
+    é só conveniência de organização: como nenhum dos dois pipelines
+    "genéricos" (este e os diagramas) depende de rede ou do sismo real,
+    faz mais sentido morarem juntos aqui do que em `resultados_fft_sismo/`
+    (reservada para artefatos com dado real da Venezuela).
+
     Aviso de tempo: o maior N padrão é 2¹⁴ = 16384; como a DFT força
     bruta é O(N²), esse ponto sozinho domina o tempo total do benchmark
     (a própria `_medir_tempo`, em benchmark.py, cita ~15s por chamada
@@ -119,6 +134,13 @@ def rodar_benchmark_complexidade(lista_N=LISTA_N_BENCHMARK,
 
     print(f"\n  -> CSV salvo em:     {caminho_csv}")
     print(f"  -> Gráfico salvo em: {caminho_grafico}")
+
+    caminho_divisao = os.path.join(diretorio_saida, "divisao_n8.png")
+    plot_divisao_fft_n8(caminho_divisao)
+    caminho_borboleta = os.path.join(diretorio_saida, "borboleta_n8.png")
+    plot_borboleta_n8(caminho_borboleta)
+    print(f"  -> Diagrama de divisão salvo em:  {caminho_divisao}")
+    print(f"  -> Diagrama da borboleta salvo em: {caminho_borboleta}")
 
     return resultados_bench
 
@@ -260,7 +282,6 @@ def rodar_estudo_de_caso_real(diretorio_saida=RESULTADOS_DIR):
     plot_espectros(resultados, os.path.join(diretorio_saida, "3_espectros_fft.png"))
     plot_benchmark(resultados, os.path.join(diretorio_saida, "4_benchmark_dft_fft.png"))
     salvar_resumo_csv(resultados, os.path.join(diretorio_saida, "resumo_estacoes.csv"))
-    plot_borboleta_n8(os.path.join(diretorio_saida, "5_borboleta_n8.png"))
 
     print("\n[4/4] Resumo do benchmark:")
     print(f'  {"Estação":15s} {"Dist (km)":>10s} {"DFT (ms)":>10s} {"FFT (ms)":>10s} {"Ganho":>8s}')

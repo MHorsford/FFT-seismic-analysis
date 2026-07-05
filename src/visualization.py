@@ -16,6 +16,15 @@ Duas famílias de funções aqui, alimentadas por pipelines diferentes:
    `dft`/`fft` — ou seja, essas funções já estão prontas para uso, mas
    dependem de esse script de orquestração (fora do escopo desta revisão)
    preencher os dicionários com os campos esperados.
+
+3. Diagramas DIDÁTICOS do algoritmo em si, para N=8: `plot_divisao_fft_n8`
+   (a árvore de recursão — pares/ímpares até as folhas) e `plot_borboleta_n8`
+   (a combinação — folhas até a saída, com os twiddle factors). Diferente
+   dos dois grupos acima, não dependem de nenhum dado (sintético ou real):
+   são só a ilustração do próprio algoritmo `fft.fft_divisao_conquista`,
+   pensadas para os slides que explicam "Divisão" e "Conquista"
+   separadamente. As folhas de um viram a entrada do outro (mesma ordem
+   bit-reversed), então funcionam melhor apresentadas em sequência.
 """
 
 import csv
@@ -183,6 +192,140 @@ def plot_benchmark(resultados, caminho):
     fig.tight_layout()
     fig.savefig(caminho, dpi=150)
     plt.close(fig)
+
+
+def plot_divisao_fft_n8(caminho_saida, N=8):
+    """
+    Diagrama da etapa de DIVISÃO da FFT Radix-2 (Cooley-Tukey): a árvore
+    de recursão que separa repetidamente o vetor em índices pares
+    (x[0::2]) e ímpares (x[1::2]) até sobrar um único elemento por folha
+    — exatamente a metade "Divisão" de `fft.fft_divisao_conquista`, sem
+    a parte de combinação.
+
+    Este diagrama é o par do `plot_borboleta_n8`: lá se vê a COMBINAÇÃO
+    (bottom-up: das folhas até a saída final, com os twiddle factors);
+    aqui se vê a DIVISÃO (top-down: da entrada até as folhas). Não é
+    coincidência que as folhas deste diagrama, lidas de cima para baixo,
+    saiam na mesma ordem "bit-reversed" (0, 4, 2, 6, 1, 5, 3, 7 para N=8)
+    que alimenta a coluna "Entrada" da borboleta — dividir repetidamente
+    por paridade de índice É o que produz essa ordem. Colocados lado a
+    lado (ou em slides consecutivos), os dois diagramas contam a história
+    completa de "Divisão e Conquista" sem sobreposição de conteúdo.
+
+    Construção
+    ----------
+    A árvore é construída recursivamente (`construir`, função aninhada)
+    guardando apenas os ÍNDICES em cada nó, não os valores — aqui
+    interessa só QUEM vai para cada ramo, não calcular nenhuma
+    transformada (isso já é feito por `fft.fft_divisao_conquista`).
+
+    A posição vertical de cada nó é a média das posições de seus filhos
+    (estilo dendrograma), calculada bottom-up em `calcular_posicoes`;
+    isso distribui as N folhas uniformemente no eixo Y e mantém os nós
+    internos centralizados sobre a própria subárvore. A posição
+    horizontal é simplesmente a profundidade na árvore (raiz em x=0).
+
+    Parâmetros
+    ----------
+    caminho_saida : str
+        Caminho do PNG a ser salvo.
+    N : int
+        Tamanho do vetor de entrada. Precisa ser potência de 2 (mesma
+        exigência do Radix-2). Padrão 8, para ficar consistente com
+        `plot_borboleta_n8` na apresentação.
+    """
+    if N < 1 or N & (N - 1) != 0:
+        raise ValueError("N precisa ser potência de 2.")
+
+    def construir(indices):
+        if len(indices) == 1:
+            return {"indices": indices, "filhos": []}
+        # Mesma divisão de `fft.fft_divisao_conquista`: pares primeiro,
+        # ímpares depois — é essa ordem (não uma divisão "primeira
+        # metade/segunda metade") que caracteriza o Radix-2 DIT.
+        return {
+            "indices": indices,
+            "filhos": [construir(indices[0::2]), construir(indices[1::2])],
+        }
+
+    raiz = construir(list(range(N)))
+
+    proxima_linha = [0]
+
+    def calcular_posicoes(no, profundidade):
+        no["x"] = profundidade
+        if not no["filhos"]:
+            no["y"] = proxima_linha[0]
+            proxima_linha[0] += 1
+        else:
+            for filho in no["filhos"]:
+                calcular_posicoes(filho, profundidade + 1)
+            no["y"] = float(np.mean([f["y"] for f in no["filhos"]]))
+
+    calcular_posicoes(raiz, 0)
+
+    profundidade_max = int(np.log2(N))
+
+    fig, ax = plt.subplots(figsize=(10, 6.5))
+    ax.set_xlim(-0.5, profundidade_max + 0.7)
+    ax.set_ylim(-0.7, N - 0.3)
+    ax.invert_yaxis()  # folha 0 no topo, mesmo sentido de leitura da borboleta
+    ax.set_xticks(range(profundidade_max + 1))
+
+    rotulos_col = []
+    for d in range(profundidade_max + 1):
+        tamanho = N // (2 ** d)
+        if d == 0:
+            rotulos_col.append(f"Entrada\n(N={tamanho})")
+        elif d == profundidade_max:
+            rotulos_col.append("Folhas\n(N=1, bit-reversed)")
+        else:
+            rotulos_col.append(f"Divisão {d}\n(N={tamanho})")
+    ax.set_xticklabels(rotulos_col)
+    ax.set_yticks([])
+    ax.set_title(f"FFT Radix-2 (Cooley–Tukey) — Etapa de DIVISÃO para N = {N}", fontsize=14)
+
+    cor_par = "#1f77b4"
+    cor_impar = "#d62728"
+
+    def desenhar(no):
+        eh_folha = not no["filhos"]
+        if eh_folha:
+            rotulo = f'x[{no["indices"][0]}]'
+        else:
+            rotulo = "x[" + ",".join(str(i) for i in no["indices"]) + "]"
+
+        ax.plot(no["x"], no["y"], 'o', color='black', markersize=7, zorder=3)
+
+        # Raiz: rótulo à esquerda. Folhas: rótulo à direita (mesmo estilo
+        # de `plot_borboleta_n8` para "x[idx]"/"X[idx]"). Nós internos:
+        # rótulo acima do nó, para não cruzar com as arestas.
+        if no["x"] == 0:
+            ax.text(no["x"] - 0.1, no["y"], rotulo, ha='right', va='center', fontsize=9)
+        elif eh_folha:
+            ax.text(no["x"] + 0.1, no["y"], rotulo, ha='left', va='center', fontsize=9)
+        else:
+            ax.text(no["x"], no["y"] - 0.32, rotulo, ha='center', va='bottom', fontsize=7.5,
+                    bbox=dict(facecolor='white', edgecolor='none', pad=0.5))
+
+        if eh_folha:
+            return
+        pares, impares = no["filhos"]
+        ax.plot([no["x"], pares["x"]], [no["y"], pares["y"]], '-', color=cor_par, lw=1.6, zorder=1)
+        ax.plot([no["x"], impares["x"]], [no["y"], impares["y"]], '-', color=cor_impar, lw=1.6, zorder=1)
+        desenhar(pares)
+        desenhar(impares)
+
+    desenhar(raiz)
+
+    ax.plot([], [], color=cor_par, lw=1.6, label="Pares — x[0::2]")
+    ax.plot([], [], color=cor_impar, lw=1.6, label="Ímpares — x[1::2]")
+    ax.legend(loc="upper right", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(caminho_saida, dpi=200)
+    plt.close(fig)
+    print(f"Diagrama de divisão salvo em: {caminho_saida}")
 
 
 def plot_borboleta_n8(caminho_saida):
