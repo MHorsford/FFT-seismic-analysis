@@ -1,0 +1,15 @@
+{
+  "nome": "Venezuela — evento M7.2 de 24/06/2026",
+  "origem": "2026-06-24T22:04:33Z",
+  "magnitude": 7.2,
+  "profundidade_km": 21.9,
+  "latitude": 10.435,
+  "longitude": -68.472,
+  "distancia_min_km": 500.0,
+  "regiao_busca": {
+    "minlatitude": -10.0,
+    "maxlatitude": 12.5,
+    "minlongitude": -71.0,
+    "maxlongitude": -46.0
+  }
+}

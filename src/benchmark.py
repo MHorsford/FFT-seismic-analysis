@@ -118,8 +118,7 @@ def benchmark_avancado(lista_N, num_repeticoes=5):
       chamada de função e fatiamento de array a cada nível de recursão.
       Reportar as duas coisas lado a lado é o que permite discutir essa
       diferença entre complexidade assintótica e desempenho medido na
-      prática (ótimo ponto para a arguição oral — ver Plano de Execução,
-      Passo 6).
+      prática (um ponto importante para a arguição oral).
     - `resultados_batem`: DFT própria vs FFT própria.
     - `fft_propria_bate_com_numpy`: FFT própria vs numpy.fft.fft. Testamos
       contra os DOIS (não só contra a própria DFT) porque, se as duas
@@ -131,8 +130,8 @@ def benchmark_avancado(lista_N, num_repeticoes=5):
     ----------
     lista_N : list[int]
         Tamanhos de sinal a testar. Não precisam ser potência de 2 (o
-        padding é feito aqui dentro); tipicamente potências de 2 de
-        2⁴ a 2¹⁴, como sugerido no Plano de Execução, Passo 6.
+        padding é feito aqui dentro); tipicamente usamos potências de 2 de
+        2⁴ a 2¹⁴ para revelar a forma assintótica das curvas.
     num_repeticoes : int
         Repetições por N. Mais repetições = média mais estável, mas
         também mais tempo total — a DFT é O(N²), então o N mais alto da

@@ -1,21 +1,19 @@
 """
 Geração dos gráficos e tabelas usados na apresentação.
 
-Duas famílias de funções aqui, alimentadas por pipelines diferentes:
+Três famílias de funções aqui, alimentadas por pipelines diferentes:
 
 1. Estudo de complexidade com sinal SINTÉTICO (o que embasa a análise de
    algoritmo em si): `plot_benchmark_avancado`, alimentada por
    `benchmark.benchmark_avancado`. Essa é autossuficiente com o que está
    neste projeto.
 
-2. Estudo de caso com o TERREMOTO REAL (Venezuela -> Pará): `plot_mapa_estacoes`,
-   `plot_secao_sismica`, `plot_espectros`, `plot_benchmark` e `salvar_resumo_csv`.
-   Essas esperam uma lista de dicionários por estação (ver docstring de cada
-   uma para as chaves exigidas) que hoje é montada por um script "principal"
-   que amarra `data.buscar_estacoes()` + `data.baixar_forma_de_onda()` com
-   `dft`/`fft` — ou seja, essas funções já estão prontas para uso, mas
-   dependem de esse script de orquestração (fora do escopo desta revisão)
-   preencher os dicionários com os campos esperados.
+2. Estudo de caso com um TERREMOTO REAL: `plot_mapa_estacoes`,
+   `plot_secao_sismica`, `plot_tempo_frequencia`, `plot_espectros`,
+   `plot_benchmark` e `salvar_resumo_csv`. O `main.py` monta a lista de
+   resultados por estação e passa a configuração do evento; por isso as
+   figuras funcionam tanto para o caso apresentado quanto para outro evento
+   descrito em JSON.
 
 3. Diagramas DIDÁTICOS do algoritmo em si, para N=8: `plot_divisao_fft_n8`
    (a árvore de recursão — pares/ímpares até as folhas) e `plot_borboleta_n8`
@@ -34,7 +32,7 @@ matplotlib.use("Agg")  # backend não-interativo — ver nota abaixo
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.data import EVENTO_LAT, EVENTO_LON, JANELA_PRE_EVENTO_S
+from src.data import EVENTO_PADRAO
 from src.benchmark import ajustar_curvas
 
 # Por que forçar o backend "Agg" (e por que ANTES de importar pyplot):
@@ -62,18 +60,20 @@ from src.benchmark import ajustar_curvas
 # do processo — depois disso, o backend já está carregado.
 
 
-def plot_mapa_estacoes(resultados, caminho):
+def plot_mapa_estacoes(resultados, caminho, evento=None):
     """
     Mapa (lat/lon) do epicentro + estações encontradas, com a distância
     ao epicentro anotada ao lado de cada uma.
 
     `resultados`: lista de dicts, cada um precisando de "lon", "lat",
     "rede", "estacao", "dist_km" — exatamente o formato que
-    `data.buscar_estacoes()` já devolve.
+    `data.buscar_estacoes()` já devolve. `evento` fornece o epicentro; quando
+    omitido, usa o caso apresentado em sala.
     """
+    evento = EVENTO_PADRAO if evento is None else evento
     fig, ax = plt.subplots(figsize=(7, 8))
-    ax.scatter(EVENTO_LON, EVENTO_LAT, marker="*", s=400, color="red",
-               zorder=5, label="Epicentro (Venezuela)")
+    ax.scatter(evento["longitude"], evento["latitude"], marker="*", s=400,
+               color="red", zorder=5, label="Epicentro do evento")
     lons = [r["lon"] for r in resultados]
     lats = [r["lat"] for r in resultados]
     ax.scatter(lons, lats, s=80, color="royalblue", zorder=4,
@@ -84,7 +84,7 @@ def plot_mapa_estacoes(resultados, caminho):
                     textcoords="offset points")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
-    ax.set_title("Estações sismográficas: Venezuela → Pará")
+    ax.set_title(f'Estações sismográficas — {evento["nome"]}')
     ax.legend(loc="lower right")
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -92,24 +92,33 @@ def plot_mapa_estacoes(resultados, caminho):
     plt.close(fig)
 
 
-def plot_secao_sismica(resultados, caminho):
+def plot_secao_sismica(resultados, caminho, evento=None):
     """
-    "Seção sísmica": uma linha do tempo por estação (empilhadas no eixo Y
-    por ordem de distância), cada uma mostrando a forma de onda normalizada
-    e um marcador na chegada teórica da onda P. É o gráfico clássico para
-    visualizar a propagação de um terremoto ao longo de uma rede.
+    DOMÍNIO DO TEMPO: amplitude registrada em função dos segundos.
+
+    A seção sísmica empilha uma forma de onda por estação, em ordem de
+    distância, e marca a chegada teórica da onda P. O eixo X é tempo após a
+    origem do terremoto; portanto, deslocamentos horizontais mostram a
+    propagação. Este gráfico responde "o que aconteceu e quando?" — não mostra
+    ainda quais frequências compõem o movimento.
 
     `resultados`: lista de dicts, cada um precisando de "trace_completo"
     (objeto Trace do ObsPy, o retorno de `data.baixar_forma_de_onda`),
-    "rede", "estacao", "dist_km" e "t_chegada_p_s" (tempo da chegada
-    teórica da onda P, em segundos desde a origem do Evento 1 — calculado
-    a partir de `data.tempo_chegada_p_teorico`, já orquestrado com o T0 do
-    evento).
+    "rede", "estacao", "dist_km", "t_chegada_p_s" e
+    "inicio_janela_s" (ambos em segundos depois da origem).
     """
+    evento = EVENTO_PADRAO if evento is None else evento
     fig, ax = plt.subplots(figsize=(10, 7))
     for i, r in enumerate(resultados):
         tr = r["trace_completo"]
-        t = np.arange(tr.stats.npts) / tr.stats.sampling_rate - JANELA_PRE_EVENTO_S
+        # O Trace baixado começa perto da chegada P, não 60 s antes do evento.
+        # Somar `inicio_janela_s` coloca cada amostra na posição temporal
+        # correta em relação à origem comum do terremoto.
+        inicio_janela_s = r.get(
+            "inicio_janela_s",
+            r["t_chegada_p_s"] - r.get("margem_pre_p_s", 10),
+        )
+        t = inicio_janela_s + np.arange(tr.stats.npts) / tr.stats.sampling_rate
         dados = tr.data.astype(float)
         dados = dados - np.mean(dados)
         amp = dados / (np.max(np.abs(dados)) + 1e-9)  # normaliza p/ caber na faixa da estação
@@ -118,40 +127,117 @@ def plot_secao_sismica(resultados, caminho):
                 fontsize=7, va="center")
         ax.plot(r["t_chegada_p_s"], i, "r|", markersize=12)
     ax.axvline(0, color="blue", linestyle="--", linewidth=1,
-               label="Origem (Evento 1, M7.2)")
-    ax.plot([], [], "r|", label="Chegada teórica da onda P")  # entrada "fantasma" só p/ legenda
-    ax.set_xlabel("Tempo desde a origem (s)")
+               label="Origem do terremoto (t = 0 s)")
+    # Entrada sem dados: cria a legenda do marcador vertical usado em cada
+    # estação sem desenhar uma série adicional no gráfico.
+    ax.plot([], [], "r|", label="Chegada teórica da onda P")
+    ax.set_xlabel("DOMÍNIO DO TEMPO — segundos após a origem do terremoto (s)")
     ax.set_ylabel("Estações (ordenadas pela distância do epicentro)")
     ax.set_yticks([])
-    ax.set_title("Seção sísmica — propagação do sismo (Venezuela → Pará)")
+    ax.set_title(
+        "DOMÍNIO DO TEMPO — amplitude do solo ao longo do tempo\n"
+        f'{evento["nome"]}'
+    )
     ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(caminho, dpi=150)
     plt.close(fig)
 
 
+def plot_tempo_frequencia(resultados, caminho, freq_max_hz=10):
+    """Coloca as duas representações do mesmo sinal lado a lado.
+
+    Esta é a figura didática central para evitar a confusão entre domínios. O
+    painel esquerdo usa as amostras de uma estação no domínio do tempo; o
+    direito usa a magnitude da FFT dessas mesmas amostras (após remoção da
+    média e eventual zero-padding) no domínio da frequência.
+    """
+    if not resultados:
+        raise ValueError("É necessário ao menos um resultado para gerar a figura.")
+
+    # A estação mais próxima com download bem-sucedido costuma ter a forma de
+    # onda mais fácil de reconhecer; `resultados` já vem ordenado por distância.
+    r = resultados[0]
+    janela = np.asarray(r["janela_analise"], dtype=float)
+    taxa = float(r.get("taxa_amostragem_hz", r["trace_completo"].stats.sampling_rate))
+    tempo = np.arange(len(janela)) / taxa
+    amplitude_fft = r.get("amplitude_fft", r.get("amplitude"))
+    if amplitude_fft is None:
+        raise ValueError("Resultado sem amplitude_fft/amplitude.")
+
+    fig, (ax_tempo, ax_freq) = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax_tempo.plot(tempo, janela, color="royalblue", linewidth=0.8)
+    ax_tempo.set_title("DOMÍNIO DO TEMPO\nO que aconteceu e quando?")
+    ax_tempo.set_xlabel("Tempo dentro da janela (s)")
+    ax_tempo.set_ylabel("Amplitude registrada (contagens do sensor)")
+    ax_tempo.grid(alpha=0.3)
+
+    ax_freq.plot(r["freqs"], amplitude_fft, color="darkorange", linewidth=1.0)
+    ax_freq.set_xlim(0, min(freq_max_hz, r["freqs"][-1]))
+    ax_freq.set_title("DOMÍNIO DA FREQUÊNCIA\nQuais frequências formam o sinal?")
+    ax_freq.set_xlabel("Frequência (Hz = ciclos por segundo)")
+    ax_freq.set_ylabel("Amplitude espectral")
+    ax_freq.grid(alpha=0.3)
+
+    rotulo = f'{r["rede"]}.{r["estacao"]} — {r["dist_km"]:.0f} km do epicentro'
+    fig.suptitle(
+        "OS MESMOS DADOS EM DUAS REPRESENTAÇÕES\n"
+        f"{rotulo}   |   a FFT transforma tempo → frequência",
+        fontsize=14,
+    )
+    fig.text(
+        0.5, 0.015,
+        "Tempo: eixo X em segundos.   Frequência: eixo X em hertz. "
+        "A FFT não cria outro terremoto; apenas reorganiza a informação.",
+        ha="center", fontsize=9,
+    )
+    fig.tight_layout(rect=(0, 0.06, 1, 0.88))
+    fig.savefig(caminho, dpi=180)
+    plt.close(fig)
+
+
 def plot_espectros(resultados, caminho, freq_max_hz=10):
     """
-    Um subplot por estação com o espectro de amplitude (|FFT|) do trecho
-    baixado, limitado a `freq_max_hz` (a maior parte da energia sísmica de
-    interesse cai bem abaixo disso; cortar o eixo ajuda a leitura).
+    DOMÍNIO DA FREQUÊNCIA: amplitude de cada frequência, em hertz.
+
+    Um subplot por estação mostra o espectro calculado por DFT e FFT sobre o
+    mesmo vetor. A linha da FFT e os pontos da DFT devem coincidir: os dois
+    métodos calculam a mesma transformada, mas com custos O(N log N) e O(N²).
+    O limite ``freq_max_hz`` amplia a faixa de maior interesse sísmico.
 
     `resultados`: lista de dicts, cada um precisando de "freqs" (eixo de
-    frequência, ex.: `np.fft.fftfreq`) e "amplitude" (|FFT| já calculada),
-    além de "rede", "estacao", "dist_km" para os rótulos.
+    frequência), "amplitude_dft" e "amplitude_fft". O campo antigo
+    "amplitude" continua aceito como fallback para compatibilidade.
     """
     n = len(resultados)
     fig, axs = plt.subplots(n, 1, figsize=(8, 2.2 * n), sharex=True)
     if n == 1:
         axs = [axs]
     for ax, r in zip(axs, resultados):
-        ax.plot(r["freqs"], r["amplitude"], color="darkorange")
-        ax.set_ylabel(f'{r["rede"]}.{r["estacao"]}\n{r["dist_km"]:.0f} km', fontsize=8)
+        amplitude_fft = r.get("amplitude_fft", r.get("amplitude"))
+        if amplitude_fft is None:
+            raise ValueError("Resultado sem amplitude_fft/amplitude.")
+        amplitude_dft = r.get("amplitude_dft")
+        ax.plot(r["freqs"], amplitude_fft, color="darkorange", linewidth=1.2,
+                label="FFT O(N log N) — linha")
+        if amplitude_dft is not None:
+            # Pontos espaçados deixam visível que a DFT está sobre a mesma
+            # curva, em vez de uma linha esconder completamente a outra.
+            passo = max(1, len(r["freqs"]) // 80)
+            ax.plot(r["freqs"][::passo], amplitude_dft[::passo], "o",
+                    color="royalblue", markersize=2.5,
+                    label="DFT O(N²) — pontos de conferência")
+        ax.set_ylabel(f'Amplitude\n{r["rede"]}.{r["estacao"]}', fontsize=8)
         ax.set_xlim(0, min(freq_max_hz, r["freqs"][-1]))
         ax.grid(alpha=0.3)
-    axs[-1].set_xlabel("Frequência (Hz)")
-    fig.suptitle("Espectro de amplitude (FFT pura) por estação")
-    fig.tight_layout()
+    axs[0].legend(loc="upper right", fontsize=8)
+    axs[-1].set_xlabel("DOMÍNIO DA FREQUÊNCIA — frequência (Hz = ciclos por segundo)")
+    fig.suptitle(
+        "DOMÍNIO DA FREQUÊNCIA — composição do sinal por estação\n"
+        "DFT e FFT produzem o mesmo espectro; muda o custo para calculá-lo"
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(caminho, dpi=150)
     plt.close(fig)
 
@@ -499,10 +585,13 @@ def salvar_resumo_csv(resultados, caminho):
     """
     Salva o resumo por estação (dataset real, um resultado por estação —
     ver `plot_secao_sismica`/`plot_benchmark` para as chaves esperadas de
-    cada dict) em CSV, pronto para anexar como tabela na apresentação.
+    cada dict) em CSV, pronto para anexar como tabela na apresentação. O nome
+    do evento e o tamanho efetivo N acompanham cada linha para que um CSV de
+    teste com outro terremoto continue autoexplicativo fora do programa.
     """
-    campos = ["rede", "estacao", "lat", "lon", "dist_km",
-              "taxa_amostragem_hz", "t_chegada_p_s", "janela_incompleta",
+    campos = ["evento_nome", "rede", "estacao", "lat", "lon", "dist_km",
+              "taxa_amostragem_hz", "t_chegada_p_s", "inicio_janela_s",
+              "N_pad", "janela_incompleta",
               "tempo_dft_s", "tempo_fft_s", "speedup", "resultados_batem"]
     with open(caminho, "w", newline="", encoding="utf-8") as f:
         escritor = csv.DictWriter(f, fieldnames=campos)

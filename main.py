@@ -1,7 +1,6 @@
 """
-Script principal — amarra os módulos de `src/` nas duas análises do
-projeto (ver `FFT_e_Análise_Sísmica.md` e `Plano_de_Execucao_Tarefa2_FFT.md`
-para o contexto teórico e o plano completo):
+Script principal — integra os módulos de `src/` nas duas análises do projeto.
+O contexto teórico e as instruções de reprodução estão no `README.md`:
 
 1. FASE 1 — Benchmark de complexidade (sinal sintético)
    Compara DFT força bruta, FFT própria (Divisão e Conquista) e
@@ -19,14 +18,15 @@ para o contexto teórico e o plano completo):
    `resultados_fft_sismo/`, que é só para artefatos com dado real da
    Venezuela. Não depende de rede: só de numpy/scipy.
 
-2. FASE 2 — Estudo de caso real (sismos da Venezuela, 24/06/2026)
-   Busca estações sismográficas entre a Venezuela e o Pará
+2. FASE 2 — Estudo de caso real (por padrão, Venezuela, 24/06/2026)
+   Busca estações sismográficas na região definida pelo evento
    (`data.buscar_estacoes`), baixa a forma de onda vertical de cada uma
    (`data.baixar_forma_de_onda`), roda DFT e FFT sobre a mesma janela de
    análise e mede o tempo de cada uma (`processar_estacao`, abaixo).
    Gera mapa das estações, seção sísmica, espectros de frequência,
    comparação DFT×FFT por estação e resumo em CSV — tudo em
-   `resultados_fft_sismo/`. Depende dos serviços FDSN (rede).
+   `resultados_fft_sismo/`. Depende dos serviços FDSN (rede). Outro evento
+   pode ser fornecido com `--evento arquivo.json`.
 
 As duas fases são independentes de propósito — uma é síntese/teoria, a
 outra é o dado real — por isso vivem em funções separadas
@@ -39,6 +39,7 @@ Uso: `python main.py`, a partir da raiz do projeto (onde está a pasta
 `src/`).
 """
 
+import argparse
 import csv
 import os
 import time
@@ -48,8 +49,8 @@ import numpy as np
 from src.data import (
     buscar_estacoes,
     baixar_forma_de_onda,
+    carregar_evento,
     tempo_chegada_p_teorico,
-    ORIGEM_T0,
 )
 from src.dft import dft_forca_bruta
 from src.benchmark import benchmark_avancado
@@ -60,6 +61,7 @@ from src.fft import (
 from src.visualization import (
     plot_mapa_estacoes,
     plot_secao_sismica,
+    plot_tempo_frequencia,
     plot_espectros,
     plot_benchmark,
     salvar_resumo_csv,
@@ -78,7 +80,7 @@ DIR_BENCHMARK = "resultados"
 # --------------------------------------------------------------------
 # Configuração — Fase 2 (estudo de caso real)
 # --------------------------------------------------------------------
-N_ANALISE = 2048       # amostras por janela (ver FFT_e_Análise_Sísmica.md)
+N_ANALISE = 2048       # 2¹¹ amostras: potência de 2 e custo DFT ainda viável
 MARGEM_PRE_P_S = 10    # segundos "antes da onda P" incluídos na janela
 RESULTADOS_DIR = "resultados_fft_sismo"
 
@@ -94,7 +96,7 @@ def rodar_benchmark_complexidade(lista_N=LISTA_N_BENCHMARK,
 
     É esse benchmark — não a tabela de ~186x da nota teórica, que conta
     OPERAÇÕES, não tempo — que sustenta a discussão de complexidade
-    assintótica vs. desempenho medido (ver Plano de Execução, Passo 6).
+    assintótica vs. desempenho medido.
 
     Também gera, na mesma pasta, os dois diagramas didáticos do algoritmo
     para N=8 (`visualization.plot_divisao_fft_n8` e `plot_borboleta_n8`).
@@ -170,13 +172,17 @@ def extrair_janela_analise(tr, inicio_janela, n_amostras):
     return trecho, incompleta
 
 
-def processar_estacao(estacao, tr):
+def processar_estacao(estacao, tr, evento=None):
     """
     Aplica o pipeline DFT/FFT completo à forma de onda `tr` de uma
     estação: recorta a janela de análise (`extrair_janela_analise`),
     prepara o sinal (detrend + zero-padding até potência de 2, via
     `fft.preparar_sinal_para_fft`), roda DFT força bruta e FFT própria
     sobre o MESMO sinal preparado e cronometra as duas.
+
+    `evento` é o dicionário carregado por `data.carregar_evento`. Mantê-lo
+    como parâmetro — em vez de consultar constantes globais — é o que permite
+    repetir o estudo com outro terremoto.
 
     Retorna um dict combinando os dados originais da estação (`**estacao`
     — rede, estação, lat/lon, dist_km, taxa de amostragem, vindos de
@@ -186,8 +192,10 @@ def processar_estacao(estacao, tr):
     `plot_benchmark`, `salvar_resumo_csv`) lê só o subconjunto de chaves
     que precisa, então um único dict "rico" como este alimenta todas.
     """
-    t_chegada_p = tempo_chegada_p_teorico(estacao["dist_km"])
-    inicio_janela = ORIGEM_T0 + t_chegada_p - MARGEM_PRE_P_S
+    evento = carregar_evento() if evento is None else evento
+    t_chegada_p = tempo_chegada_p_teorico(estacao["dist_km"], evento)
+    inicio_janela_s = t_chegada_p - MARGEM_PRE_P_S
+    inicio_janela = evento["origem"] + inicio_janela_s
     janela_bruta, incompleta = extrair_janela_analise(tr, inicio_janela, N_ANALISE)
     sinal, N_pad = preparar_sinal_para_fft(janela_bruta)
 
@@ -201,25 +209,40 @@ def processar_estacao(estacao, tr):
 
     resultados_batem = bool(np.allclose(espec_dft, espec_fft, atol=1e-6))
 
-    # Espectro de amplitude de um lado só (0 até Nyquist); o fator
-    # 2/N_pad normaliza pra amplitude "física" de cada componente, já
-    # compensando a energia que a FFT de sinal real espelha na metade
-    # negativa do espectro (que aqui simplesmente descartamos com
-    # `[:metade]`, já que ela é redundante para sinal real).
+    # DOMÍNIO DA FREQUÊNCIA: `rfftfreq` cria um eixo de 0 Hz até a
+    # frequência de Nyquist (taxa/2). Para sinal real, a metade negativa do
+    # espectro é o espelho da positiva; por isso guardamos só N/2+1 bins.
+    # A normalização começa em |X|/N e dobra apenas os bins internos. DC
+    # (0 Hz) e Nyquist não têm par distinto e, portanto, não são dobrados.
     taxa = tr.stats.sampling_rate
-    freqs = np.arange(N_pad) * taxa / N_pad
-    metade = N_pad // 2
-    amplitude = np.abs(espec_fft) * 2.0 / N_pad
+    freqs = np.fft.rfftfreq(N_pad, d=1.0 / taxa)
+
+    def espectro_unilateral(espectro):
+        amplitude = np.abs(espectro[:len(freqs)]) / N_pad
+        if len(amplitude) > 2:
+            amplitude[1:-1] *= 2.0
+        return amplitude
+
+    amplitude_fft = espectro_unilateral(espec_fft)
+    amplitude_dft = espectro_unilateral(espec_dft)
 
     return {
         **estacao,
+        "evento_nome": evento["nome"],
+        "taxa_amostragem_hz": taxa,
         "t_chegada_p_s": t_chegada_p,
+        "inicio_janela_s": inicio_janela_s,
+        "margem_pre_p_s": MARGEM_PRE_P_S,
         "janela_incompleta": incompleta,
         "trace_completo": tr,
         "janela_analise": janela_bruta,
         "N_pad": N_pad,
-        "freqs": freqs[:metade],
-        "amplitude": amplitude[:metade],
+        # `amplitude` é mantido como alias por compatibilidade com figuras
+        # antigas; novos consumidores devem preferir `amplitude_fft`.
+        "freqs": freqs,
+        "amplitude": amplitude_fft,
+        "amplitude_fft": amplitude_fft,
+        "amplitude_dft": amplitude_dft,
         "tempo_dft_s": t_dft,
         "tempo_fft_s": t_fft,
         "speedup": (t_dft / t_fft) if t_fft > 0 else float("nan"),
@@ -227,12 +250,12 @@ def processar_estacao(estacao, tr):
     }
 
 
-def rodar_estudo_de_caso_real(diretorio_saida=RESULTADOS_DIR):
+def rodar_estudo_de_caso_real(diretorio_saida=RESULTADOS_DIR, evento=None):
     """
-    Fase 2 — estudo de caso com dados sísmicos reais dos sismos da
-    Venezuela (24/06/2026): busca estações, baixa a forma de onda de cada
-    uma, roda `processar_estacao` e gera os 5 artefatos visuais + o CSV
-    resumo em `diretorio_saida`.
+    Fase 2 — estudo de caso com dados sísmicos reais do evento configurado:
+    busca estações, baixa a forma de onda de cada uma, roda
+    `processar_estacao` e gera 5 artefatos visuais + o CSV resumo em
+    `diretorio_saida`.
 
     Diferente da Fase 1, esta depende de rede (serviços FDSN via ObsPy):
     uma estação cujo download falhar é pulada (log "[FALHOU]") em vez de
@@ -246,26 +269,35 @@ def rodar_estudo_de_caso_real(diretorio_saida=RESULTADOS_DIR):
     mesma coisa que os gráficos e o CSV usam. Lista vazia se nada deu
     certo.
     """
+    evento = carregar_evento() if evento is None else evento
     os.makedirs(diretorio_saida, exist_ok=True)
     print("=" * 60)
-    print("FASE 2 — Sismos da Venezuela (24/06/2026): estudo de caso real")
+    print(f'FASE 2 — Estudo de caso real: {evento["nome"]}')
     print("=" * 60)
+    print(f'Origem UTC: {evento["origem"]}')
+    print(f'Epicentro: {evento["latitude"]:.4f}, {evento["longitude"]:.4f} | '
+          f'M{evento["magnitude"]:.1f} | {evento["profundidade_km"]:.1f} km')
 
-    print("\n[1/4] Buscando estações entre a Venezuela e o Pará...")
-    estacoes = buscar_estacoes()
+    print("\n[1/4] Buscando estações na região configurada...")
+    estacoes = buscar_estacoes(evento)
     print(f"  -> {len(estacoes)} estações selecionadas")
 
     if not estacoes:
         print("Nenhuma estação encontrada.")
         return []
 
-    print("\n[2/4] Baixando formas de onda e aplicando DFT/FFT puras...")
+    print("\n[2/4] Baixando formas de onda e calculando DFT/FFT na mesma janela...")
     resultados = []
     for est in estacoes:
         rotulo = f'{est["rede"]}.{est["estacao"]} ({est["dist_km"]:.0f} km)'
         try:
-            tr = baixar_forma_de_onda(est, n_analise=N_ANALISE, margem_pre_p_s=MARGEM_PRE_P_S)
-            res = processar_estacao(est, tr)
+            tr = baixar_forma_de_onda(
+                est,
+                evento=evento,
+                n_analise=N_ANALISE,
+                margem_pre_p_s=MARGEM_PRE_P_S,
+            )
+            res = processar_estacao(est, tr, evento)
             resultados.append(res)
             print(f"  [OK] {rotulo:35s} DFT={res['tempo_dft_s']*1000:7.2f}ms "
                   f"FFT={res['tempo_fft_s']*1000:7.2f}ms")
@@ -277,10 +309,21 @@ def rodar_estudo_de_caso_real(diretorio_saida=RESULTADOS_DIR):
         return []
 
     print(f"\n[3/4] Gerando gráficos em ./{diretorio_saida}/ ...")
-    plot_mapa_estacoes(resultados, os.path.join(diretorio_saida, "1_mapa_estacoes.png"))
-    plot_secao_sismica(resultados, os.path.join(diretorio_saida, "2_secao_sismica.png"))
-    plot_espectros(resultados, os.path.join(diretorio_saida, "3_espectros_fft.png"))
-    plot_benchmark(resultados, os.path.join(diretorio_saida, "4_benchmark_dft_fft.png"))
+    plot_mapa_estacoes(
+        resultados, os.path.join(diretorio_saida, "1_mapa_estacoes.png"), evento
+    )
+    plot_secao_sismica(
+        resultados, os.path.join(diretorio_saida, "2_dominio_tempo.png"), evento
+    )
+    plot_tempo_frequencia(
+        resultados, os.path.join(diretorio_saida, "3_tempo_x_frequencia.png")
+    )
+    plot_espectros(
+        resultados, os.path.join(diretorio_saida, "4_dominio_frequencia.png")
+    )
+    plot_benchmark(
+        resultados, os.path.join(diretorio_saida, "5_benchmark_dft_fft.png")
+    )
     salvar_resumo_csv(resultados, os.path.join(diretorio_saida, "resumo_estacoes.csv"))
 
     print("\n[4/4] Resumo do benchmark:")
@@ -293,20 +336,71 @@ def rodar_estudo_de_caso_real(diretorio_saida=RESULTADOS_DIR):
     return resultados
 
 
-def main():
-    """
-    Roda as duas fases em sequência: primeiro o benchmark de
-    complexidade (rápido de reexecutar, sem rede), depois o estudo de
-    caso real (mais lento, depende dos serviços FDSN).
+def criar_parser_argumentos():
+    """Monta a interface de linha de comando exibida por ``--help``.
 
-    Para rodar só uma delas — por exemplo, ajustando os gráficos do
-    estudo de caso sem recalcular o benchmark inteiro de novo — chame a
-    função da fase correspondente diretamente (`rodar_benchmark_complexidade()`
-    ou `rodar_estudo_de_caso_real()`) em vez de `main()`.
+    A separação em uma função facilita testar a interpretação dos argumentos
+    sem iniciar benchmark nem downloads. O uso básico continua sendo
+    ``python main.py``; as opções existem principalmente para o professor
+    reproduzir apenas uma fase ou fornecer outro terremoto.
     """
-    rodar_benchmark_complexidade()
-    print()
-    rodar_estudo_de_caso_real()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compara DFT e FFT por Divisão e Conquista e aplica ambas a "
+            "formas de onda de um terremoto real."
+        )
+    )
+    parser.add_argument(
+        "--fase",
+        choices=("todas", "benchmark", "sismo"),
+        default="todas",
+        help=(
+            "'benchmark' roda só a análise O(N²) x O(N log N); 'sismo' "
+            "roda só o estudo real; padrão: todas."
+        ),
+    )
+    parser.add_argument(
+        "--evento",
+        metavar="ARQUIVO.json",
+        help=(
+            "configuração de outro terremoto; use evento_exemplo.json como "
+            "modelo. Sem esta opção, usa o evento apresentado em sala."
+        ),
+    )
+    parser.add_argument(
+        "--saida-sismo",
+        default=RESULTADOS_DIR,
+        metavar="PASTA",
+        help=f"pasta dos resultados sísmicos (padrão: {RESULTADOS_DIR}).",
+    )
+    return parser
+
+
+def main(argv=None):
+    """Executa as fases escolhidas na linha de comando.
+
+    Exemplos
+    --------
+    Caso apresentado, duas fases::
+
+        python main.py
+
+    Outro terremoto, sem repetir o benchmark sintético::
+
+        python main.py --fase sismo --evento evento_exemplo.json \
+            --saida-sismo resultados_outro_evento
+    """
+    args = criar_parser_argumentos().parse_args(argv)
+
+    if args.fase in ("todas", "benchmark"):
+        rodar_benchmark_complexidade()
+
+    if args.fase in ("todas", "sismo"):
+        if args.fase == "todas":
+            print()
+        evento = carregar_evento(args.evento)
+        rodar_estudo_de_caso_real(args.saida_sismo, evento)
+
     print("\nConcluído.")
 
 

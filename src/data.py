@@ -1,8 +1,21 @@
-"""
-Aquisição de dados sísmicos: FDSN, busca de estações e geração sintética.
+"""Aquisição e configuração dos dados sísmicos usados no projeto.
+
+O módulo concentra tudo o que depende do *evento* (origem, epicentro e
+profundidade) e da rede FDSN.  Essa separação é importante porque os módulos de
+DFT/FFT não precisam saber de onde o vetor numérico veio: para eles, um
+sismograma real e um sinal sintético são apenas sequências de amostras.
+
+O evento apresentado em sala continua sendo o padrão, mas não está mais
+"preso" ao código.  :func:`carregar_evento` aceita um arquivo JSON com outro
+terremoto; as funções públicas recebem esse dicionário e repetem exatamente o
+mesmo pipeline.  Assim, o professor pode conferir a generalidade da aplicação
+sem editar os algoritmos.
 """
 
+import json
 import warnings
+from copy import deepcopy
+
 import numpy as np
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client, RoutingClient
@@ -17,29 +30,45 @@ except Exception:
 
 warnings.filterwarnings("ignore")
 
-# -----------------------------------------------
-# Parâmetros do evento sísmico
-# -----------------------------------------------
-EVENTOS = [
-    {"nome": "Evento 1 (M7.2, foreshock)", "origem": UTCDateTime("2026-06-24T22:04:33"),
-     "mag": 7.2, "profundidade_km": 21.9},
-    {"nome": "Evento 2 (M7.5, mainshock)", "origem": UTCDateTime("2026-06-24T22:05:11"),
-     "mag": 7.5, "profundidade_km": 10.0},
-]
+# ---------------------------------------------------------------------------
+# Evento e região usados na apresentação
+# ---------------------------------------------------------------------------
+# A região de busca não representa a área afetada pelo terremoto. Ela é apenas
+# o retângulo dentro do qual consultamos estações: do epicentro, na Venezuela,
+# até o Pará.  Mantê-la junto do evento permite que outro JSON use outro
+# recorte geográfico sem alterar nenhuma função.
+EVENTO_PADRAO = {
+    "nome": "Venezuela — evento M7.2 de 24/06/2026",
+    "origem": UTCDateTime("2026-06-24T22:04:33"),
+    "magnitude": 7.2,
+    "profundidade_km": 21.9,
+    "latitude": 10.435,
+    "longitude": -68.472,
+    "distancia_min_km": 500.0,
+    "regiao_busca": {
+        "minlatitude": -10.0,
+        "maxlatitude": 12.5,
+        "minlongitude": -71.0,
+        "maxlongitude": -46.0,
+    },
+}
 
-EVENTO_LAT = 10.435
-EVENTO_LON = -68.472
-EVENTO_PROFUNDIDADE_KM = EVENTOS[1]["profundidade_km"]
-ORIGEM_T0 = EVENTOS[0]["origem"]
-
-# -----------------------------------------------
-# Configuração da busca de estações
-# -----------------------------------------------
-REGIAO_BUSCA = {
-    "minlatitude": -10.0,
-    "maxlatitude": 12.5,
-    "minlongitude": -71.0,
-    "maxlongitude": -46.0,
+# Campos obrigatórios no JSON. A validação antecipada produz uma mensagem
+# compreensível, em vez de um KeyError aparecer só no meio de um download.
+_CAMPOS_EVENTO = {
+    "nome",
+    "origem",
+    "magnitude",
+    "profundidade_km",
+    "latitude",
+    "longitude",
+    "regiao_busca",
+}
+_CAMPOS_REGIAO = {
+    "minlatitude",
+    "maxlatitude",
+    "minlongitude",
+    "maxlongitude",
 }
 
 REDES_PERMITIDAS = "IU,CU,G,BR,BL,ON,NB"
@@ -49,11 +78,9 @@ FONTES_BUSCA = [
     ("USP (reforço redes brasileiras)", "USP", REDES_BRASILEIRAS),
 ]
 
-PRIORIDADE_CANAL = ["BHZ", "HHZ", "HNZ", "EHZ", "SHZ", "LHZ", "BHZ_00", "HHZ_00"]
+PRIORIDADE_CANAL = ["BHZ", "HHZ", "HNZ", "EHZ", "SHZ", "LHZ"]
 PADRAO_CANAL_BUSCA = "*"
 MAX_ESTACOES = 12
-JANELA_PRE_EVENTO_S = 60
-JANELA_DURACAO_S = 30 * 60
 
 # Cache de clientes FDSN
 _CLIENTES_CACHE = {}
@@ -61,10 +88,94 @@ _CLIENTES_CACHE = {}
 _MODELO_TAUP = TauPyModel(model="iasp91") if _TAUP_DISPONIVEL else None
 
 # -----------------------------------------------
-# Funções auxiliares
+# Configuração e funções auxiliares
 # -----------------------------------------------
 
+
+def carregar_evento(caminho_json=None):
+    """Carrega e valida a configuração de um terremoto.
+
+    Parameters
+    ----------
+    caminho_json : str ou None
+        Quando ``None``, devolve uma cópia do evento usado na apresentação.
+        Quando informado, deve apontar para um JSON com os mesmos campos de
+        ``evento_exemplo.json``. ``origem`` usa o padrão ISO-8601 em UTC.
+
+    Returns
+    -------
+    dict
+        Configuração independente, com ``origem`` convertida para
+        :class:`obspy.UTCDateTime`, pronta para as demais funções.
+
+    Notes
+    -----
+    A cópia evita que uma execução altere acidentalmente o evento padrão. A
+    validação verifica estrutura e limites físicos básicos; a existência real
+    do evento é confirmada indiretamente quando os serviços FDSN devolvem (ou
+    não) formas de onda para a data e a região informadas.
+    """
+    if caminho_json is None:
+        evento = deepcopy(EVENTO_PADRAO)
+    else:
+        with open(caminho_json, "r", encoding="utf-8") as arquivo:
+            evento = json.load(arquivo)
+
+    ausentes = _CAMPOS_EVENTO - set(evento)
+    if ausentes:
+        raise ValueError(
+            "Configuração do evento incompleta; faltam: "
+            + ", ".join(sorted(ausentes))
+        )
+
+    regiao = evento["regiao_busca"]
+    ausentes_regiao = _CAMPOS_REGIAO - set(regiao)
+    if ausentes_regiao:
+        raise ValueError(
+            "regiao_busca incompleta; faltam: "
+            + ", ".join(sorted(ausentes_regiao))
+        )
+
+    # UTCDateTime aceita tanto a string ISO do JSON quanto uma instância já
+    # pronta do evento padrão. Os casts seguintes também aceitam números
+    # escritos como inteiros no arquivo.
+    evento["origem"] = UTCDateTime(evento["origem"])
+    for campo in ("magnitude", "profundidade_km", "latitude", "longitude"):
+        evento[campo] = float(evento[campo])
+    # Distância mínima é opcional para eventos externos. No caso apresentado,
+    # 500 km remove estações quase sobre o epicentro e destaca a propagação até
+    # o Pará; para um teste local, o JSON pode usar 0 km.
+    evento["distancia_min_km"] = float(evento.get("distancia_min_km", 0.0))
+    for campo in _CAMPOS_REGIAO:
+        regiao[campo] = float(regiao[campo])
+
+    if not -90 <= evento["latitude"] <= 90:
+        raise ValueError("latitude deve estar entre -90 e 90 graus.")
+    if not -180 <= evento["longitude"] <= 180:
+        raise ValueError("longitude deve estar entre -180 e 180 graus.")
+    if evento["profundidade_km"] < 0:
+        raise ValueError("profundidade_km não pode ser negativa.")
+    if evento["distancia_min_km"] < 0:
+        raise ValueError("distancia_min_km não pode ser negativa.")
+    if regiao["minlatitude"] >= regiao["maxlatitude"]:
+        raise ValueError("minlatitude deve ser menor que maxlatitude.")
+    if regiao["minlongitude"] >= regiao["maxlongitude"]:
+        raise ValueError("minlongitude deve ser menor que maxlongitude.")
+    if not -90 <= regiao["minlatitude"] <= regiao["maxlatitude"] <= 90:
+        raise ValueError("Os limites de latitude devem ficar entre -90 e 90.")
+    if not -180 <= regiao["minlongitude"] <= regiao["maxlongitude"] <= 180:
+        raise ValueError("Os limites de longitude devem ficar entre -180 e 180.")
+
+    return evento
+
 def _melhor_canal(estacao_obspy):
+    """Escolhe o canal vertical de maior prioridade disponível.
+
+    Uma estação pode publicar vários sensores. Para comparar estações de
+    forma consistente, preferimos canais cuja última letra é ``Z``
+    (componente vertical), seguindo ``PRIORIDADE_CANAL``. O retorno contém
+    metadados; a forma de onda só é obtida em :func:`baixar_forma_de_onda`.
+    """
     canais_por_codigo = {}
     for cha in estacao_obspy.channels:
         codigo = cha.code.upper()
@@ -81,6 +192,7 @@ def _melhor_canal(estacao_obspy):
 
 
 def _obter_cliente(nome_datacenter):
+    """Cria uma conexão FDSN uma vez e a reutiliza nas demais consultas."""
     if nome_datacenter not in _CLIENTES_CACHE:
         if nome_datacenter in ("earthscope-federator", "iris-federator", "eida-routing"):
             _CLIENTES_CACHE[nome_datacenter] = RoutingClient(nome_datacenter)
@@ -89,13 +201,20 @@ def _obter_cliente(nome_datacenter):
     return _CLIENTES_CACHE[nome_datacenter]
 
 
-def tempo_chegada_p_teorico(dist_km):
-    """Estima o tempo de chegada da onda P (TauP ou velocidade de 8 km/s)."""
+def tempo_chegada_p_teorico(dist_km, evento=None):
+    """Estima a chegada da onda P, em segundos após a origem do evento.
+
+    O TauP/IASP91 calcula o tempo de viagem em um modelo estratificado da
+    Terra. Se ele não estiver disponível ou não encontrar uma fase P, usamos
+    ``distância / 8 km/s`` como aproximação explícita. Essa estimativa apenas
+    posiciona a janela perto da primeira chegada; não faz parte da FFT.
+    """
+    evento = carregar_evento() if evento is None else evento
     dist_deg = dist_km / 111.195
     if _MODELO_TAUP is not None:
         try:
             chegadas = _MODELO_TAUP.get_travel_times(
-                source_depth_in_km=EVENTO_PROFUNDIDADE_KM,
+                source_depth_in_km=evento["profundidade_km"],
                 distance_in_degree=dist_deg,
                 phase_list=["P", "p", "Pn"],
             )
@@ -107,9 +226,18 @@ def tempo_chegada_p_teorico(dist_km):
 
 
 # -----------------------------------------------
-# Busca de estações (Venezuela → Pará)
+# Busca de estações
 # -----------------------------------------------
-def buscar_estacoes():
+def buscar_estacoes(evento=None):
+    """Consulta estações na região do evento e devolve as mais próximas.
+
+    Cada item retornado contém rede, código da estação, datacenter, posição,
+    distância ao epicentro e taxa de amostragem do canal preferido. As fontes
+    são independentes: a falha de uma não descarta o que outra já forneceu.
+    Estações repetidas são removidas e o resultado é ordenado por distância.
+    """
+    evento = carregar_evento() if evento is None else evento
+    regiao = evento["regiao_busca"]
     encontradas = {}
     for nome_fonte, nome_datacenter, redes in FONTES_BUSCA:
         print(f"  [busca] Consultando {nome_fonte} (redes: {redes})...")
@@ -119,10 +247,15 @@ def buscar_estacoes():
                 network=redes,
                 station="*",
                 channel=PADRAO_CANAL_BUSCA,
-                minlatitude=REGIAO_BUSCA["minlatitude"],
-                maxlatitude=REGIAO_BUSCA["maxlatitude"],
-                minlongitude=REGIAO_BUSCA["minlongitude"],
-                maxlongitude=REGIAO_BUSCA["maxlongitude"],
+                minlatitude=regiao["minlatitude"],
+                maxlatitude=regiao["maxlatitude"],
+                minlongitude=regiao["minlongitude"],
+                maxlongitude=regiao["maxlongitude"],
+                # Filtra canais cujo período de operação intersecta o instante
+                # do sismo. Sem isso, uma estação instalada depois do evento
+                # poderia aparecer na busca e falhar apenas no download.
+                starttime=evento["origem"],
+                endtime=evento["origem"] + 1,
                 level="channel",
             )
         except Exception as e:
@@ -133,10 +266,11 @@ def buscar_estacoes():
         for network in inventory:
             for station in network:
                 dist_km = gps2dist_azimuth(
-                    EVENTO_LAT, EVENTO_LON, station.latitude, station.longitude
+                    evento["latitude"], evento["longitude"],
+                    station.latitude, station.longitude
                 )[0] / 1000.0
 
-                if dist_km <= 500.0:
+                if dist_km <= evento["distancia_min_km"]:
                     continue
 
                 chave = (network.code, station.code)
@@ -158,6 +292,17 @@ def buscar_estacoes():
         print(f"    -> {novas} estação(ões) nova(s) via {nome_fonte}.")
 
     if not encontradas:
+        # A contingência abaixo contém estações do caso Venezuela -> Pará.
+        # Para outro evento, usá-la seria produzir um resultado enganoso; nesse
+        # caso devolvemos vazio e o usuário pode revisar a região no JSON.
+        evento_padrao = (
+            abs(evento["latitude"] - EVENTO_PADRAO["latitude"]) < 1e-9
+            and abs(evento["longitude"] - EVENTO_PADRAO["longitude"]) < 1e-9
+            and evento["origem"] == EVENTO_PADRAO["origem"]
+        )
+        if not evento_padrao:
+            print("  [!] Nenhuma estação encontrada para a região do evento informado.")
+            return []
         print("  [PLANO B] Nenhuma fonte respondeu; ativando lista de contingência estática...")
         return [
             {"rede": "CU", "estacao": "GRGR", "datacenter": "earthscope-federator",
@@ -174,14 +319,24 @@ def buscar_estacoes():
 # -----------------------------------------------
 # Download da forma de onda real
 # -----------------------------------------------
-def baixar_forma_de_onda(estacao, n_analise=2048, margem_pre_p_s=10):
+def baixar_forma_de_onda(estacao, evento=None, n_analise=2048,
+                         margem_pre_p_s=10):
     """
-    Baixa um trecho de forma de onda vertical da estação, centrado na
-    janela de análise (usada depois pela DFT/FFT).
+    Baixa a janela vertical fornecida, sem mudança, à DFT e à FFT.
+
+    O início é ``origem + chegada_P - margem``; portanto, há amostras antes
+    da primeira onda P e depois dela. A duração é
+    ``n_analise / taxa_amostragem``. Canais verticais e códigos de localização
+    são tentados em ordem porque cada rede adota convenções diferentes.
+
+    A primeira resposta válida é centralizada removendo a média (``demean``).
+    Se nenhuma combinação responder, a exceção permite que o chamador pule só
+    essa estação, em vez de interromper todo o estudo de caso.
     """
+    evento = carregar_evento() if evento is None else evento
     cliente = _obter_cliente(estacao["datacenter"])
-    t_chegada_p = tempo_chegada_p_teorico(estacao["dist_km"])
-    inicio = ORIGEM_T0 + t_chegada_p - margem_pre_p_s
+    t_chegada_p = tempo_chegada_p_teorico(estacao["dist_km"], evento)
+    inicio = evento["origem"] + t_chegada_p - margem_pre_p_s
     fim = inicio + (n_analise / estacao.get("taxa_amostragem_hz", 20.0))
 
     if estacao["rede"] in ("BR", "BL", "ON", "NB"):
